@@ -2,13 +2,13 @@
 package main
 
 import (
-	//"bytes"
-	//"encoding/binary"
+	"bytes"
+	"encoding/binary"
 	//"fmt"
 	"github.com/hy05190134/smb/common"
 	//"github.com/hy05190134/smb/smb"
 	//"github.com/hy05190134/smb/smb/encoder"
-	//"io"
+	"io"
 	"net"
 	"os"
 	//"regexp"
@@ -103,7 +103,7 @@ func ReceiveRequest(lconn *net.TCPConn, sh ShareData) {
 		buf := make([]byte, 1024)
 
 		lconn.SetReadDeadline(time.Now().Add(time.Second * 10))
-		n, err := lconn.Read(buf)
+		n, err := io.ReadAtLeast(lconn, buf, 68)
 		if err != nil {
 			common.Log.Debug("Read request buf error: %s", err)
 			break
@@ -111,12 +111,44 @@ func ReceiveRequest(lconn *net.TCPConn, sh ShareData) {
 
 		common.Log.Trace("read request %d success", n)
 
-		smbMsg := SmbMessage{
-			length: uint64(n),
-			data:   buf[:n],
+		//read first 4 byte
+		var messageLen uint32 = 0
+		r := bytes.NewBuffer(buf)
+		if err := binary.Read(r, binary.BigEndian, &messageLen); err != nil {
+			common.Log.Debug("parse message len failed, err: %s", err)
+			break
+		} else {
+			common.Log.Trace("message len: %d", messageLen)
 		}
 
-		sh.RcvReqChan <- smbMsg
+		if int(messageLen)+4 <= n {
+			smbMsg := SmbMessage{
+				length: uint64(n),
+				data:   buf[:n],
+			}
+
+			sh.RcvReqChan <- smbMsg
+		} else {
+			remainingLen := int(messageLen) + 4 - n
+			remainingBuf := make([]byte, messageLen+4)
+			lconn.SetReadDeadline(time.Now().Add(time.Second * 10))
+			num, err := io.ReadAtLeast(lconn, remainingBuf[n:], remainingLen)
+			if err != nil {
+				common.Log.Debug("Read request buf error: %s", err)
+				break
+			}
+
+			for i := 0; i < n; i++ {
+				remainingBuf[i] = buf[i]
+			}
+
+			smbMsg := SmbMessage{
+				length: uint64(messageLen) + 4,
+				data:   remainingBuf[:n+num],
+			}
+
+			sh.RcvReqChan <- smbMsg
+		}
 	}
 
 	lconn.Close()
@@ -166,7 +198,7 @@ func ReceiveResponse(lconn *net.TCPConn, sh ShareData) {
 		buf := make([]byte, 1024)
 
 		lconn.SetReadDeadline(time.Now().Add(time.Second * 10))
-		n, err := lconn.Read(buf)
+		n, err := io.ReadAtLeast(lconn, buf, 68)
 		if err != nil {
 			common.Log.Debug("Read response buf error: %s", err)
 			break
@@ -174,12 +206,44 @@ func ReceiveResponse(lconn *net.TCPConn, sh ShareData) {
 
 		common.Log.Trace("read response %d success", n)
 
-		smbMsg := SmbMessage{
-			length: uint64(n),
-			data:   buf[:n],
+		//read first 4 byte
+		var messageLen uint32 = 0
+		r := bytes.NewBuffer(buf)
+		if err := binary.Read(r, binary.BigEndian, &messageLen); err != nil {
+			common.Log.Debug("parse message len failed, err: %s", err)
+			break
+		} else {
+			common.Log.Trace("message len: %d", messageLen)
 		}
 
-		sh.RcvRspChan <- smbMsg
+		if int(messageLen)+4 <= n {
+			smbMsg := SmbMessage{
+				length: uint64(n),
+				data:   buf[:n],
+			}
+
+			sh.RcvRspChan <- smbMsg
+		} else {
+			remainingLen := int(messageLen) + 4 - n
+			remainingBuf := make([]byte, messageLen+4)
+			lconn.SetReadDeadline(time.Now().Add(time.Second * 10))
+			num, err := io.ReadAtLeast(lconn, remainingBuf[n:], remainingLen)
+			if err != nil {
+				common.Log.Debug("Read response buf error: %s", err)
+				break
+			}
+
+			for i := 0; i < n; i++ {
+				remainingBuf[i] = buf[i]
+			}
+
+			smbMsg := SmbMessage{
+				length: uint64(messageLen) + 4,
+				data:   remainingBuf[:n+num],
+			}
+
+			sh.RcvRspChan <- smbMsg
+		}
 	}
 
 	lconn.Close()
@@ -201,129 +265,3 @@ func SendResponse(rconn *net.TCPConn, sh ShareData) {
 	common.Log.Debug("exit send response")
 	return
 }
-
-/*
-func ReadRequest(lconn *net.TCPConn, rconn *net.TCPConn) {
-	for {
-		buf := make([]byte, 1024)
-
-		lconn.SetReadDeadline(time.Now().Add(time.Second * 10))
-		n, err := io.ReadAtLeast(lconn, buf, 68)
-		if err != nil {
-			common.Log.Debug("Read request buf error: %s", err)
-			break
-		}
-
-		common.Log.Trace("read request %d success", n)
-
-		//read first 4 byte
-		var messageLen uint32 = 0
-		r := bytes.NewBuffer(buf)
-		if err := binary.Read(r, binary.BigEndian, &messageLen); err != nil {
-			common.Log.Debug("parse message len failed, err: %s", err)
-			break
-		} else {
-			common.Log.Trace("message len: %d", messageLen)
-		}
-
-		var smbHead smb.Header
-		//read header 64 bytes
-		if err := encoder.Unmarshal(buf[4:68], &smbHead); err != nil {
-			common.Log.Debug("parse smb head failed, err: %s", err)
-			break
-		} else {
-			common.Log.Trace("smb header: %s request", smb.CommandStr[smbHead.Command])
-		}
-
-		remaining := int(messageLen) + 4 - n
-		if remaining > 0 {
-			_, err := io.ReadAtLeast(lconn, buf[n:], remaining)
-			if err != nil {
-				common.Log.Debug("Read request buf error: %s", err)
-				break
-			}
-		}
-
-		modify := false
-		var negReq smb.NegotiateReq
-		switch smbHead.Command {
-		case smb.CommandNegotiate:
-			if err := encoder.Unmarshal(buf[4:(remaining+n)], &negReq); err != nil {
-				common.Log.Debug("parse negotiate request failed, err: %s", err)
-			} else {
-				common.Log.Debug("negotiate dialects: % d", negReq.Dialects)
-				ss := make([]uint16, 0, 10)
-				for i := 0; i < len(negReq.Dialects); i++ {
-					//delete 0x03xx version
-					if negReq.Dialects[i]&0x0300 >= 0x0300 {
-						modify = true
-					} else {
-						ss = append(ss, negReq.Dialects[i])
-					}
-				}
-				//reMashall the message
-				if modify {
-					common.Log.Trace("modify dialects: % d", ss)
-					negReq.Dialects = ss
-					negReq.DialectCount = uint16(len(ss))
-					newBuf, err := encoder.Marshal(negReq)
-					if err != nil {
-						common.Log.Debug("reMarshal negotiate request failed, err: %s, resume", err)
-						modify = false
-						break
-					}
-
-					binary.BigEndian.PutUint32(buf[0:4], uint32(len(newBuf)))
-
-					//send first 4 bytes
-					if _, err := rconn.Write(buf[0:4]); err != nil {
-						common.Log.Debug("send request buf error: %s", err)
-						lconn.Close()
-						return
-					}
-
-					//send new buffer
-					if _, err := rconn.Write(newBuf); err != nil {
-						common.Log.Debug("send request buf error: %s", err)
-						lconn.Close()
-						return
-					}
-				}
-			}
-		default:
-			common.Log.Debug("transport proxy %s request", smb.CommandStr[smbHead.Command])
-		}
-
-		//if not modify
-		if !modify {
-			if _, err := rconn.Write(buf[:(n + remaining)]); err != nil {
-				common.Log.Debug("send request buf error: %s", err)
-				break
-			}
-		}
-	}
-	lconn.Close()
-}
-
-func ReadResponse(lconn *net.TCPConn, rconn *net.TCPConn) {
-	for {
-		buf := make([]byte, 1024)
-
-		lconn.SetReadDeadline(time.Now().Add(time.Second * 10))
-		n, err := lconn.Read(buf)
-		if err != nil {
-			common.Log.Debug("Read response buf error: %s", err)
-			break
-		}
-
-		common.Log.Trace("read response %d success", n)
-
-		//fmt.Println(string(buf[:n])), proxy close will throw err, client close will not
-		if _, err := rconn.Write(buf[:n]); err != nil {
-			common.Log.Debug("send response buf error: %s", err)
-			break
-		}
-	}
-	lconn.Close()
-}
-*/
